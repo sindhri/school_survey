@@ -1,0 +1,185 @@
+---
+title: "R Notebook"
+Author: Jia Wu
+Date: 04/01/2020
+output: html_notebook
+description: analyze a school survey completed by parents and students in New York City
+---
+1. load libraries to read the data
+
+school combined downloaded here:
+https://data.world/dataquest/nyc-schools-data
+
+Survey data downloaded here: https://data.cityofnewyork.us/Education/2011-NYC-School-Survey/mnz3-dyi8
+
+```{r}
+library(readr)
+combined <- read_csv('2011 data files online/combined.csv')
+general <- read_delim('2011 data files online/masterfile11_gened_final.txt', "\t")
+d75 <- read_delim('2011 data files online/masterfile11_d75_final.txt', "\t")
+
+```
+2. Combine general and d74.
+Select only the relevant variables: dbn, xx_xx_11 etc.
+Rename column dbn to DBN.
+```{r}
+library(dplyr)
+survey <- bind_rows(general, d75)
+survey_2 <- survey %>%
+  select(c(dbn,saf_p_11:aca_tot_11)) %>%
+  rename(DBN=dbn)
+```
+
+3. Are there duplicates in survey_2
+```{r}
+duplicates <- survey_2 %>%
+  mutate(is_dup = duplicated(DBN)) %>%
+  filter(is_dup == TRUE)
+```
+4. who has the NA values:
+most missing records were from student results
+```{r}
+colSums(is.na(survey_2))
+```
+5. What columns had zeros 
+```{r}
+colSums(survey_2==0)
+```
+6. only total counts has zeros. Should be change to NA.
+Then confirm that there is no more 0 values in tot_xx_11 columns
+
+```{r}
+#install.packages("tidyr")
+library(tidyr)
+library(purrr)
+library(dplyr)
+#colSums(survey_2==0)
+convert_to_NA <- function(vname) {
+survey_2 <- survey_2 %>%
+    mutate(!!vname := na_if(!!vname, 0))
+    return(survey_2)
+}
+vname_list <- c(sym('saf_tot_11'), sym('com_tot_11'), sym('eng_tot_11'), sym('aca_tot_11'))
+for (vname in vname_list) {
+  survey_2 <- convert_to_NA(vname)
+}
+colSums(survey_2==0)
+```
+7. Reshape the survey database, rows = school x group (parent, student, teacher, total) x category ("saf", "com", "eng", "aca"), columns = ratings.
+
+```{r}
+library(ggplot2)
+library(stringr)
+category_names <- c('saf','com','eng','aca')
+group_names <- c('_p_11', '_s_11', '_t_11', '_tot_11')
+
+make_subframe <- function(category_name,group_names) {
+  old_names <- map2_chr(category_name, group_names,str_c)
+  new_names <- map2_chr("group", group_names,str_c)
+  survey_temp <- survey_2 %>%
+  select(DBN, !!old_names) %>%
+  set_names(~str_to_lower(.) %>%
+              str_replace_all(category_name,"group")) %>%
+  pivot_longer(cols = !!new_names, names_to = "group", values_to = category_name)
+  return(survey_temp)
+}
+survey_2_longer <- make_subframe(category_names[1],group_names)[,1:2]
+for (category_name in category_names) {
+  survey_2_longer <-cbind(survey_2_longer, make_subframe(category_name, group_names)[,3])
+}
+
+survey_2_longer2 <- survey_2_longer %>%
+  pivot_longer(cols = !!category_names, names_to = "category", values_to = "rating")
+```
+8. Summarize parent, student, teacher ratings on each metrics
+
+```{r}
+survey_2_longer2 %>%
+  group_by(category, group) %>%
+  drop_na(rating)%>%
+  summarize(mean(rating), sd(rating))
+```
+10. make boxplot for each metrics
+
+```{r}
+ggplot(data = survey_2_longer2)+
+  aes(x = group, y = rating, color = group) + 
+  geom_boxplot() + 
+  facet_wrap(~category)
+```
+
+11. calculate the correlation of parent, student, teacher ratings
+from observation, rating across different categories are small, and rating across different groups (parent, teacher, student) are large.
+Should be able to confirm using repeated measures ANOVA
+```{r}
+cor_mat <- survey_2 %>%
+select_if(is.numeric) %>%
+cor(use = "pairwise.complete.obs")
+
+cor_tib <- cor_mat %>%
+  as_tibble(rownames = "variable")
+
+```
+12. sum categories together, leave groups separate.
+Teacher correlates lower with parents and students, then between parents and students.
+```{r}
+survey_3 <- survey_2 %>%
+mutate(parent_rating = saf_p_11+ com_p_11+ eng_p_11+ aca_p_11, student_rating = saf_s_11+ com_s_11+ eng_s_11+ aca_s_11, teacher_rating = saf_t_11+ com_t_11+ eng_t_11+ aca_t_11) %>%
+  select(DBN,parent_rating, student_rating, teacher_rating)
+
+cor_mat <- survey_3 %>%
+select_if(is.numeric) %>%
+cor(use = "pairwise.complete.obs")
+
+cor_tib <- cor_mat %>%
+  as_tibble(rownames = "group")
+
+```
+13. inner join survey_3 with combined to study the demographic influence of the surveys
+```{r}
+combined_survey <- survey_3 %>%
+  inner_join(combined, by = "DBN")
+```
+14. study the correlations
+parent_rating vs. Num of SAT Test Takers: r = -0.39
+student_rating vs. high_score_percent: r = 0.46
+parent and student_rating vs. average_class_size: r = -0.29, -0.26
+parent_rating vs. total_enrollment: r = -0.33
+student_rating vs. asian_per: r = 0.20
+student_rating vs. black_per: r = -0.29
+parent_rating vs. Total Cohort: r = -0.38
+avg_sat_score is only slightly correlated with student rating r = 0.23, and not strongly correlated with parent or teacher rating.
+
+```{r}
+cor_mat <- combined_survey %>%
+select_if(is.numeric) %>%
+cor(use = "pairwise.complete.obs")
+
+cor_tib <- cor_mat %>%
+  as_tibble(rownames = "variable")
+
+```
+
+15. ratings in different boros
+```{r}
+combined_survey %>%
+  select(parent_rating, student_rating, teacher_rating, boro) %>%
+  drop_na()%>%
+  group_by(boro) %>%
+  summarize(mean(parent_rating), mean(student_rating), mean(teacher_rating))
+```
+
+16. boxplot comparing boros for different ratings
+Parent from Staten Islan had the lowest rating among all the boros
+```{r}
+combined_survey2 <- combined_survey %>%
+  select(parent_rating, student_rating, teacher_rating, boro) %>%
+  drop_na(boro)%>%
+  pivot_longer(cols = c(parent_rating, student_rating, teacher_rating), names_to = "group", values_to = "rating")
+
+ggplot(data = combined_survey2) + 
+  aes(x = boro, y = rating, color = boro) + 
+  geom_boxplot()+
+  facet_wrap(~group)
+```
+
